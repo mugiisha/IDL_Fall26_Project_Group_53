@@ -1,0 +1,11 @@
+# Group 53: Python 3.10 packages for the optimizer-switching project.
+# Install PyTorch first (see docs/SETUP.md), then: pip install -r requirements.txt
+torch>=2.9            # 2.9 or newer includes torch.optim.Muon
+gymnasium[mujoco]==0.29.1
+numpy<2               # Gymnasium 0.29.1 does not work well with NumPy 2
+tyro
+tensorboard
+lion-pytorch
+pandas
+matplotlib
+rliable

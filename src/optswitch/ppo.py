@@ -1,4 +1,3 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
 import random
 import time
@@ -9,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from optimizers import make_optimizer
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
@@ -46,6 +46,10 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
+    optimizer: str = "adam"
+    """optimizer: adam, sgd, rmsprop, lion, muon"""
+    muon_lr: float = 0.02
+    """lr for the muon part (hidden layers), only used with --optimizer muon"""
     num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 2048
@@ -146,7 +150,7 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.optimizer}__lr{args.learning_rate}__s{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
@@ -180,7 +184,8 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    optimizer = make_optimizer(args.optimizer, agent, args.learning_rate, muon_lr=args.muon_lr)
+    base_lrs = [group["lr"] for group in optimizer.param_groups]  # initial lr per group, used for annealing
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -201,8 +206,8 @@ if __name__ == "__main__":
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                group["lr"] = frac * base_lr
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs
