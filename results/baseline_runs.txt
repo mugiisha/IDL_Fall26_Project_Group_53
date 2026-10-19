@@ -1,0 +1,14 @@
+Baseline runs: PPO with Adam (CleanRL ppo_continuous_action.py, default settings)
+Code version (commit): d405785dcd3c1f90098f03134b01395112457def
+Date: 19 October 2026
+Machine: Razan's Windows laptop (CPU)
+Steps per run: 1,000,000
+
+HalfCheetah-v4__ppo__1__1792401806   HalfCheetah, seed 1
+HalfCheetah-v4__ppo__2__1792401825   HalfCheetah, seed 2
+HalfCheetah-v4__ppo__3__1792401834   HalfCheetah, seed 3
+Hopper-v4__ppo__1__1792404782        Hopper, seed 1
+Hopper-v4__ppo__2__1792404799        Hopper, seed 2
+Hopper-v4__ppo__3__1792404816        Hopper, seed 3
+
+smoketest_HalfCheetah                smoke test only (50,000 steps), not a result
