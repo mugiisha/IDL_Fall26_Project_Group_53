@@ -1,3 +1,5 @@
+# based on cleanrl's ppo_continuous_action.py (MIT license): https://github.com/vwxyzjn/cleanrl
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
 import random
 import time
@@ -150,7 +152,8 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.optimizer}__lr{args.learning_rate}__s{args.seed}__{int(time.time())}"
+    lr_tag = f"lr{args.learning_rate}" + (f"_mlr{args.muon_lr}" if args.optimizer == "muon" else "")
+    run_name = f"{args.env_id}__{args.optimizer}__{lr_tag}__s{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
