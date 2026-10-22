@@ -110,24 +110,32 @@ def main():
         plt.close()
         print(f"saved {out}")
 
-    # learning-rate search: final score vs lr, one line per optimizer (seed 1 only)
+    # learning-rate search: one panel per optimizer, mean over seeds with each seed shown as a dot
     for env in df.env.unique():
-        sub = df[(df.env == env) & (df.seed == 1)]
-        if sub.optimizer.nunique() < 2 and sub.lr.nunique() < 2:
+        sub = df[df.env == env]
+        opts = [o for o in ["adam", "sgd", "rmsprop", "lion", "muon"] if o in set(sub.optimizer)]
+        opts = [o for o in opts if sub[sub.optimizer == o].lr.nunique() > 1]
+        if not opts:
             continue
-        plt.figure(figsize=(5, 3.5))
-        for opt, g in sub.groupby("optimizer"):
-            g = g.sort_values("lr")
-            plt.plot(g.lr, g.final_score, marker="o", label=opt)
-        plt.xscale("log")
-        plt.xlabel("learning rate (muon: --muon-lr)")
-        plt.ylabel(f"mean return, last {int(args.last_frac * 100)}%")
-        plt.title(f"Learning-rate search on {env} (seed 1)")
-        plt.legend(fontsize=8)
-        plt.tight_layout()
+        fig, axes = plt.subplots(1, len(opts), figsize=(2.6 * len(opts), 2.8), sharey=True, squeeze=False)
+        for ax, opt in zip(axes[0], opts):
+            g = sub[sub.optimizer == opt]
+            agg = g.groupby("lr").final_score.agg(["mean", "std", "count"]).reset_index()
+            ax.errorbar(agg.lr, agg["mean"], yerr=agg["std"].fillna(0), marker="o", capsize=3)
+            ax.scatter(g.lr, g.final_score, s=10, color="gray", alpha=0.6, zorder=3)
+            for _, r in agg.iterrows():
+                ax.annotate(f"n={int(r['count'])}", (r.lr, r["mean"]), textcoords="offset points",
+                            xytext=(0, 6), ha="center", fontsize=6)
+            ax.set_xscale("log")
+            ax.set_title(opt, fontsize=9)
+            ax.set_xlabel("--muon-lr" if opt == "muon" else "learning rate", fontsize=8)
+            ax.tick_params(which="both", labelsize=7)
+        axes[0][0].set_ylabel(f"mean return, last {int(args.last_frac * 100)}%", fontsize=8)
+        fig.suptitle(f"Learning-rate search on {env} (dots = seeds, bars = std)", fontsize=9)
+        fig.tight_layout()
         out = os.path.join(args.plots, f"lr_search_{env}.png")
-        plt.savefig(out, dpi=200)
-        plt.close()
+        fig.savefig(out, dpi=200)
+        plt.close(fig)
         print(f"saved {out}")
 
 

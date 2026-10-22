@@ -1,0 +1,27 @@
+RMSProp learning-rate search: PPO on HalfCheetah-v4, 1,000,000 steps per run
+Run by: Candace Hunzwi
+Machine: MacBook Air (CPU)
+Code version (commit):651fa40ee984e24951900af296b1fba8216cd97e
+Command pattern: python src/optswitch/ppo.py --optimizer rmsprop --learning-rate <lr> --seed <seed>
+
+seed 1
+HalfCheetah-v4__rmsprop__lr0.0001__s1__1792565460   lr 0.0001, seed 1
+HalfCheetah-v4__rmsprop__lr0.0003__s1__1792565781   lr 0.0003, seed 1
+HalfCheetah-v4__rmsprop__lr0.001__s1__1792565845    lr 0.001,  seed 1
+
+seeds 2 and 3
+HalfCheetah-v4__rmsprop__lr0.0001__s2__1792610981   lr 0.0001, seed 2
+HalfCheetah-v4__rmsprop__lr0.0001__s3__1792611767   lr 0.0001, seed 3
+HalfCheetah-v4__rmsprop__lr0.0003__s2__1792610993   lr 0.0003, seed 2
+HalfCheetah-v4__rmsprop__lr0.0003__s3__1792611781   lr 0.0003, seed 3
+HalfCheetah-v4__rmsprop__lr0.001__s2__1792611005    lr 0.001,  seed 2
+HalfCheetah-v4__rmsprop__lr0.001__s3__1792611811    lr 0.001,  seed 3
+
+Result (mean return over the last 10% of training, 3 seeds):
+lr 0.0001: 1578.2 +/- 826.4
+lr 0.0003: 2407.4 +/- 892.2   <- chosen
+lr 0.001:  1378.4 +/- 91.4
+
+Note: with seed 1 only, 0.001 looked best (1480.7 vs 1401.8 for 0.0003).
+Seeds 2 and 3 reversed the order, so 0.0003 was chosen from the 3-seed means.
+Raw logs: Google Drive, IDL Group 53 Project / lr_search
