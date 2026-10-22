@@ -3,4 +3,5 @@ runs.zip
 *.zip
 MUJOCO_LOG.TXT
 __pycache__/
-*.pyc
+*.pyc.DS_Store
+zips/

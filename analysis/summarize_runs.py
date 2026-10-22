@@ -14,6 +14,10 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 # published cleanrl ppo_continuous_action results (docs.cleanrl.dev)
 CLEANRL_REF = {"HalfCheetah-v4": (1442.64, 46.03), "Hopper-v4": (2382.86, 271.74)}
 
+# chosen learning rate per optimizer (muon: --muon-lr), used for the comparison figure
+CHOSEN = [("adam", 3e-4, "Adam 3e-4\n(default)"), ("adam", 1e-4, "Adam 1e-4"), ("sgd", 1e-2, "SGD 1e-2"),
+          ("rmsprop", 3e-4, "RMSProp 3e-4"), ("lion", 1e-4, "Lion 1e-4"), ("muon", 5e-3, "Muon 5e-3")]
+
 NEW_NAME = re.compile(r"^(?P<env>[^_]+)__(?P<opt>[a-z]+)__lr(?P<lr>[0-9.e-]+)(_mlr(?P<mlr>[0-9.e-]+))?__s(?P<seed>\d+)__\d+$")
 OLD_NAME = re.compile(r"^(?P<env>[^_]+)__ppo__(?P<seed>\d+)__\d+$")  # baseline runs, adam lr 3e-4
 
@@ -134,6 +138,41 @@ def main():
         fig.suptitle(f"Learning-rate search on {env} (dots = seeds, bars = std)", fontsize=9)
         fig.tight_layout()
         out = os.path.join(args.plots, f"lr_search_{env}.png")
+        fig.savefig(out, dpi=200)
+        plt.close(fig)
+        print(f"saved {out}")
+
+
+    # comparison: each optimizer at its chosen lr, both envs, mean +- std with seeds as dots
+    envs = [e for e in ["HalfCheetah-v4", "Hopper-v4"] if e in set(df.env)]
+    if envs:
+        fig, axes = plt.subplots(1, len(envs), figsize=(5 * len(envs), 3.4), squeeze=False)
+        for ax, env in zip(axes[0], envs):
+            labels, means, stds = [], [], []
+            for i, (opt, lr, label) in enumerate(CHOSEN):
+                g = df[(df.env == env) & (df.optimizer == opt) & np.isclose(df.lr, lr)]
+                labels.append(label)
+                if g.empty:
+                    means.append(np.nan)
+                    stds.append(0)
+                    continue
+                means.append(g.final_score.mean())
+                stds.append(g.final_score.std() if len(g) > 1 else 0)
+                ax.scatter(np.full(len(g), i), g.final_score, s=12, color="k", zorder=3)
+            x = np.arange(len(CHOSEN))
+            ax.bar(x, means, yerr=stds, capsize=3, color="tab:blue", alpha=0.6)
+            base = df[(df.env == env) & (df.optimizer == "adam") & np.isclose(df.lr, 3e-4)]
+            if not base.empty:
+                ax.axhline(base.final_score.mean(), color="tab:red", ls="--", lw=1, label="Adam default mean")
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, fontsize=7)
+            ax.set_title(env, fontsize=9)
+            ax.tick_params(axis="y", labelsize=7)
+            ax.legend(fontsize=7)
+        axes[0][0].set_ylabel(f"mean return, last {int(args.last_frac * 100)}%", fontsize=8)
+        fig.suptitle("Optimizers at their chosen learning rate (bars = mean +- std, dots = seeds)", fontsize=9)
+        fig.tight_layout()
+        out = os.path.join(args.plots, "optimizer_comparison.png")
         fig.savefig(out, dpi=200)
         plt.close(fig)
         print(f"saved {out}")
