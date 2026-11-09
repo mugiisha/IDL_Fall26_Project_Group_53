@@ -1,7 +1,12 @@
 # based on cleanrl's ppo_continuous_action.py (MIT license): https://github.com/vwxyzjn/cleanrl
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import json
 import os
+import platform
 import random
+import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
@@ -80,6 +85,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    log_signals: bool = True
+    """log extra per-iteration signals (read-only, does not change training)"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -88,6 +95,40 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+
+def run_info(args):
+    # where and with what this run was made
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def git(*cmd):
+        try:
+            return subprocess.run(["git", "-C", here, *cmd], capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return "unknown"
+
+    commit = git("rev-parse", "HEAD") or "unknown"
+    info = {
+        "git_commit": commit,
+        "git_dirty": "unknown" if commit == "unknown" else bool(git("status", "--porcelain", "--", ".")),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "processor": platform.processor(),
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "torch_threads": torch.get_num_threads(),
+        "gymnasium": gym.__version__,
+        "numpy": np.__version__,
+        "argv": sys.argv,
+        "args": vars(args),
+    }
+    try:
+        import mujoco
+
+        info["mujoco"] = mujoco.__version__
+    except Exception:
+        info["mujoco"] = "unknown"
+    return info
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -171,6 +212,8 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+    with open(f"runs/{run_name}/run_info.json", "w") as f:
+        json.dump(run_info(args), f, indent=2, default=str)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -206,6 +249,7 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
+        t_rollout = time.perf_counter()
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -253,6 +297,8 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
+        t_update = time.perf_counter()
+
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -264,6 +310,10 @@ if __name__ == "__main__":
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
+        # per-minibatch stats, only read, never fed back into training
+        sig = {"grad_norm": [], "pg_loss": [], "v_loss": [], "entropy": [], "approx_kl": [], "old_approx_kl": []}
+        if args.log_signals:
+            params_before = torch.cat([p.detach().reshape(-1) for p in agent.parameters()]).clone()
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -309,11 +359,21 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
+
+                if args.log_signals:
+                    sig["grad_norm"].append(grad_norm.item())  # norm before clipping
+                    sig["pg_loss"].append(pg_loss.item())
+                    sig["v_loss"].append(v_loss.item())
+                    sig["entropy"].append(entropy_loss.item())
+                    sig["approx_kl"].append(approx_kl.item())
+                    sig["old_approx_kl"].append(old_approx_kl.item())
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
+
+        t_end = time.perf_counter()
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
@@ -330,6 +390,20 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+        if args.log_signals:
+            # iteration means over all minibatches (the losses/ tags above are last minibatch only)
+            for key, vals in sig.items():
+                writer.add_scalar(f"signals/{key}_mean", np.mean(vals), global_step)
+            gn = np.array(sig["grad_norm"])
+            writer.add_scalar("signals/grad_norm_max", gn.max(), global_step)
+            writer.add_scalar("signals/grad_clip_frac", np.mean(gn > args.max_grad_norm), global_step)
+            with torch.no_grad():
+                params_after = torch.cat([p.detach().reshape(-1) for p in agent.parameters()])
+                writer.add_scalar("signals/update_norm", (params_after - params_before).norm().item(), global_step)
+                writer.add_scalar("signals/param_norm", params_after.norm().item(), global_step)
+            writer.add_scalar("time/rollout_s", t_update - t_rollout, global_step)
+            writer.add_scalar("time/update_s", t_end - t_update, global_step)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
