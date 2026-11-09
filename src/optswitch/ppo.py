@@ -87,6 +87,8 @@ class Args:
     """the target KL divergence threshold"""
     log_signals: bool = True
     """log extra per-iteration signals (read-only, does not change training)"""
+    log_gns: bool = True
+    """log the gradient noise scale (extra gradients at fixed weights, does not change training)"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -129,6 +131,36 @@ def run_info(args):
     except Exception:
         info["mujoco"] = "unknown"
     return info
+
+
+def noise_scale(agent, args, rng, b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values):
+    # gradient noise scale, small vs big batch estimator (McCandlish et al. 2018)
+    # gradients are taken at the current weights with autograd.grad, so .grad and the optimizer are untouched
+    # uses its own rng, not the global one, so the training shuffle is the same
+    params = list(agent.parameters())
+    adv = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)  # whole-batch normalisation
+
+    def grad_sq(idx):
+        _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[idx], b_actions[idx])
+        ratio = (newlogprob - b_logprobs[idx]).exp()
+        pg_loss = torch.max(-adv[idx] * ratio, -adv[idx] * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)).mean()
+        newvalue = newvalue.view(-1)
+        if args.clip_vloss:
+            v_clipped = b_values[idx] + torch.clamp(newvalue - b_values[idx], -args.clip_coef, args.clip_coef)
+            v_loss = 0.5 * torch.max((newvalue - b_returns[idx]) ** 2, (v_clipped - b_returns[idx]) ** 2).mean()
+        else:
+            v_loss = 0.5 * ((newvalue - b_returns[idx]) ** 2).mean()
+        loss = pg_loss - args.ent_coef * entropy.mean() + v_loss * args.vf_coef
+        grads = torch.autograd.grad(loss, params, allow_unused=True)
+        return sum((g**2).sum().item() for g in grads if g is not None)
+
+    big, small = args.batch_size, args.minibatch_size
+    perm = rng.permutation(big)
+    g_small = np.mean([grad_sq(perm[i : i + small]) for i in range(0, big, small)])
+    g_big = grad_sq(np.arange(big))
+    g2 = (big * g_big - small * g_small) / (big - small)  # estimate of |G|^2
+    tr_sigma = (g_small - g_big) / (1 / small - 1 / big)  # estimate of tr(cov)
+    return g2, tr_sigma
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -230,6 +262,7 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
+    gns_rng = np.random.default_rng(args.seed + 12345)  # separate from np.random, which the shuffle uses
     optimizer = make_optimizer(args.optimizer, agent, args.learning_rate, muon_lr=args.muon_lr)
     base_lrs = [group["lr"] for group in optimizer.param_groups]  # initial lr per group, used for annealing
 
@@ -306,6 +339,11 @@ if __name__ == "__main__":
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
+
+        if args.log_gns:
+            t_gns = time.perf_counter()
+            gns_g2, gns_tr = noise_scale(agent, args, gns_rng, b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values)
+            t_gns = time.perf_counter() - t_gns
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
@@ -403,7 +441,13 @@ if __name__ == "__main__":
                 writer.add_scalar("signals/update_norm", (params_after - params_before).norm().item(), global_step)
                 writer.add_scalar("signals/param_norm", params_after.norm().item(), global_step)
             writer.add_scalar("time/rollout_s", t_update - t_rollout, global_step)
-            writer.add_scalar("time/update_s", t_end - t_update, global_step)
+            writer.add_scalar("time/update_s", t_end - t_update - (t_gns if args.log_gns else 0.0), global_step)
+        if args.log_gns:
+            # log both parts; for analysis average each over iterations before dividing
+            writer.add_scalar("signals/gns_g2", gns_g2, global_step)
+            writer.add_scalar("signals/gns_tr_sigma", gns_tr, global_step)
+            writer.add_scalar("signals/gns_simple", gns_tr / gns_g2 if gns_g2 > 0 else float("nan"), global_step)
+            writer.add_scalar("time/gns_s", t_gns, global_step)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
