@@ -51,12 +51,18 @@ def main():
     ap.add_argument("--allow-nan", nargs="*", default=["signals/gns_simple"], help="new tags where nan is expected")
     ap.add_argument("--expect", choices=sorted(PRESETS), help="also require these tags, one value per iteration")
     ap.add_argument("--step-tag", default="charts/learning_rate", help="ref tag that marks the iteration steps")
+    ap.add_argument("--min-step", type=int, default=0, help="only compare steps above this (e.g. after a resume)")
     a = ap.parse_args()
 
     ref_path, new_path = find_run(a.ref), find_run(a.new)
     print("ref:", ref_path)
     print("new:", new_path)
     ref, new = load(ref_path), load(new_path)
+    if a.min_step:
+        cut = lambda run: {t: [(st, v) for st, v in vals if st > a.min_step] for t, vals in run.items()}
+        ref, new = cut(ref), cut(new)
+        ref = {t: v for t, v in ref.items() if v}
+        print(f"comparing steps above {a.min_step} only")
 
     failed = 0
     for tag in sorted(ref):

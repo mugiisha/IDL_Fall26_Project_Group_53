@@ -1,5 +1,6 @@
 # based on cleanrl's ppo_continuous_action.py (MIT license): https://github.com/vwxyzjn/cleanrl
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import hashlib
 import json
 import os
 import platform
@@ -9,12 +10,14 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from ckpt_utils import check_compatible, get_env_state, get_rng_state, save_safely, set_env_state, set_rng_state, verify
 from optimizers import make_optimizer
 import tyro
 from torch.distributions.normal import Normal
@@ -89,6 +92,16 @@ class Args:
     """log extra per-iteration signals (read-only, does not change training)"""
     log_gns: bool = True
     """log the gradient noise scale (extra gradients at fixed weights, does not change training)"""
+    checkpoint_at: tuple[float, ...] = ()
+    """fractions of training to save a checkpoint at, e.g. 0.1 0.3 0.5 0.7"""
+    checkpoint_final: bool = False
+    """also save a checkpoint after the last iteration"""
+    checkpoint_dir: str = "checkpoints"
+    """where checkpoints go (one folder per run)"""
+    resume_from: Optional[str] = None
+    """checkpoint to continue from; a different --optimizer means a switch"""
+    reset_optimizer: bool = False
+    """start the optimizer state fresh even if the optimizer is the same"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -97,6 +110,18 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+
+CKPT_FORMAT = "optswitch-ckpt-1"
+
+
+def load_checkpoint(path):
+    digest = verify(path)  # must match the hash written when it was saved
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)  # tensors and plain values only
+    if ckpt.get("format") != CKPT_FORMAT:
+        sys.exit(f"{path} is not a checkpoint from this script")
+    ckpt["sha256"] = digest
+    return ckpt
 
 
 def run_info(args):
@@ -225,8 +250,23 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    lr_tag = f"lr{args.learning_rate}" + (f"_mlr{args.muon_lr}" if args.optimizer == "muon" else "")
-    run_name = f"{args.env_id}__{args.optimizer}__{lr_tag}__s{args.seed}__{int(time.time())}"
+    if any(not 0 < p < 1 for p in args.checkpoint_at):
+        sys.exit("--checkpoint-at takes fractions between 0 and 1")
+    ckpt_iters = {int(p * args.num_iterations) for p in args.checkpoint_at}
+
+    ckpt, carry = None, False
+    if args.resume_from:
+        ckpt = load_checkpoint(args.resume_from)
+        carry, problems = check_compatible(ckpt["args"], vars(args))
+        if problems:
+            sys.exit("cannot resume from this checkpoint:\n  " + "\n  ".join(problems))
+        pct = round(100 * ckpt["iteration"] / args.num_iterations)
+        mode = "carry" if carry else "reset"
+        src_opt = ckpt["args"]["optimizer"]
+        run_name = f"{args.env_id}__switch__{src_opt}-to-{args.optimizer}__at{pct}__{mode}__s{args.seed}__{int(time.time())}"
+    else:
+        lr_tag = f"lr{args.learning_rate}" + (f"_mlr{args.muon_lr}" if args.optimizer == "muon" else "")
+        run_name = f"{args.env_id}__{args.optimizer}__{lr_tag}__s{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
@@ -244,8 +284,12 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+    run_meta = run_info(args)  # not "info": the episode loop below uses that name
+    if ckpt is not None:
+        run_meta["resumed_from"] = {"path": os.path.abspath(args.resume_from), "sha256": ckpt["sha256"],
+                                "source_run": ckpt["run_name"], "iteration": ckpt["iteration"], "carry_state": carry}
     with open(f"runs/{run_name}/run_info.json", "w") as f:
-        json.dump(run_info(args), f, indent=2, default=str)
+        json.dump(run_meta, f, indent=2, default=str)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -281,7 +325,23 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    for iteration in range(1, args.num_iterations + 1):
+    start_iteration, start_step = 1, 0
+    if ckpt is not None:
+        # everything is built as usual above, then overwritten with the checkpoint state
+        if ckpt["device"] != str(device):
+            sys.exit(f"checkpoint was made on {ckpt['device']}, this run uses {device}")
+        agent.load_state_dict(ckpt["agent"])
+        if carry:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        set_env_state(envs, ckpt["env"])
+        next_obs, next_done = ckpt["next_obs"].to(device), ckpt["next_done"].to(device)
+        global_step = start_step = ckpt["global_step"]
+        start_iteration = ckpt["iteration"] + 1
+        torch.set_rng_state(ckpt["torch_rng"])  # rng last, after anything that might use it
+        set_rng_state(ckpt["rng"], gns_rng)
+        print(f"resumed from {args.resume_from} at iteration {ckpt['iteration']} ({'carry' if carry else 'fresh'} optimizer state)")
+
+    for iteration in range(start_iteration, args.num_iterations + 1):
         t_rollout = time.perf_counter()
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -313,6 +373,13 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+
+        # fingerprint of this rollout, to check that continuations start from the same data
+        h = hashlib.sha256()
+        for buf in (obs, actions, logprobs, rewards, dones, values):
+            h.update(buf.cpu().numpy().tobytes())
+        with open(f"runs/{run_name}/rollout_hashes.txt", "a") as f:
+            f.write(f"{iteration} {global_step} {h.hexdigest()}\n")
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -426,8 +493,8 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        print("SPS:", int((global_step - start_step) / (time.time() - start_time)))
+        writer.add_scalar("charts/SPS", int((global_step - start_step) / (time.time() - start_time)), global_step)
 
         if args.log_signals:
             # iteration means over all minibatches (the losses/ tags above are last minibatch only)
@@ -448,6 +515,19 @@ if __name__ == "__main__":
             writer.add_scalar("signals/gns_tr_sigma", gns_tr, global_step)
             writer.add_scalar("signals/gns_simple", gns_tr / gns_g2 if gns_g2 > 0 else float("nan"), global_step)
             writer.add_scalar("time/gns_s", t_gns, global_step)
+
+        if iteration in ckpt_iters or (args.checkpoint_final and iteration == args.num_iterations):
+            state = {
+                "format": CKPT_FORMAT, "iteration": iteration, "global_step": global_step,
+                "num_iterations": args.num_iterations, "run_name": run_name, "args": vars(args),
+                "git_commit": run_meta["git_commit"], "device": str(device), "optimizer_name": args.optimizer,
+                "agent": agent.state_dict(), "optimizer": optimizer.state_dict(),
+                "next_obs": next_obs.cpu(), "next_done": next_done.cpu(),
+                "torch_rng": torch.get_rng_state(), "rng": get_rng_state(gns_rng), "env": get_env_state(envs),
+            }
+            path = os.path.join(args.checkpoint_dir, run_name, f"iter{iteration:04d}.pt")
+            save_safely(state, path, torch.save)
+            print(f"checkpoint saved: {path}")
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
