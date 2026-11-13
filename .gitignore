@@ -3,5 +3,14 @@ runs.zip
 *.zip
 MUJOCO_LOG.TXT
 __pycache__/
-*.pyc.DS_Store
+*.pyc
+.DS_Store
 zips/
+
+# experiment outputs, never committed
+runs_oracle/
+checkpoints/
+*.pt
+*.pt.sha256
+*.pt.tmp
+scratch/

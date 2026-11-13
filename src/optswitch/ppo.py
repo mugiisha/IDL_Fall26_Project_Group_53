@@ -1,15 +1,23 @@
 # based on cleanrl's ppo_continuous_action.py (MIT license): https://github.com/vwxyzjn/cleanrl
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import hashlib
+import json
 import os
+import platform
 import random
+import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from ckpt_utils import check_compatible, get_env_state, get_rng_state, save_safely, set_env_state, set_rng_state, verify
 from optimizers import make_optimizer
 import tyro
 from torch.distributions.normal import Normal
@@ -80,6 +88,20 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    log_signals: bool = True
+    """log extra per-iteration signals (read-only, does not change training)"""
+    log_gns: bool = True
+    """log the gradient noise scale (extra gradients at fixed weights, does not change training)"""
+    checkpoint_at: tuple[float, ...] = ()
+    """fractions of training to save a checkpoint at, e.g. 0.1 0.3 0.5 0.7"""
+    checkpoint_final: bool = False
+    """also save a checkpoint after the last iteration"""
+    checkpoint_dir: str = "checkpoints"
+    """where checkpoints go (one folder per run)"""
+    resume_from: Optional[str] = None
+    """checkpoint to continue from; a different --optimizer means a switch"""
+    reset_optimizer: bool = False
+    """start the optimizer state fresh even if the optimizer is the same"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -88,6 +110,82 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+
+CKPT_FORMAT = "optswitch-ckpt-1"
+
+
+def load_checkpoint(path):
+    digest = verify(path)  # must match the hash written when it was saved
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)  # tensors and plain values only
+    if ckpt.get("format") != CKPT_FORMAT:
+        sys.exit(f"{path} is not a checkpoint from this script")
+    ckpt["sha256"] = digest
+    return ckpt
+
+
+def run_info(args):
+    # where and with what this run was made
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def git(*cmd):
+        try:
+            return subprocess.run(["git", "-C", here, *cmd], capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return "unknown"
+
+    commit = git("rev-parse", "HEAD") or "unknown"
+    info = {
+        "git_commit": commit,
+        "git_dirty": "unknown" if commit == "unknown" else bool(git("status", "--porcelain", "--", ".")),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "processor": platform.processor(),
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "torch_threads": torch.get_num_threads(),
+        "gymnasium": gym.__version__,
+        "numpy": np.__version__,
+        "argv": sys.argv,
+        "args": vars(args),
+    }
+    try:
+        import mujoco
+
+        info["mujoco"] = mujoco.__version__
+    except Exception:
+        info["mujoco"] = "unknown"
+    return info
+
+
+def noise_scale(agent, args, rng, b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values):
+    # gradient noise scale, small vs big batch estimator (McCandlish et al. 2018)
+    # gradients are taken at the current weights with autograd.grad, so .grad and the optimizer are untouched
+    # uses its own rng, not the global one, so the training shuffle is the same
+    params = list(agent.parameters())
+    adv = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)  # whole-batch normalisation
+
+    def grad_sq(idx):
+        _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[idx], b_actions[idx])
+        ratio = (newlogprob - b_logprobs[idx]).exp()
+        pg_loss = torch.max(-adv[idx] * ratio, -adv[idx] * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)).mean()
+        newvalue = newvalue.view(-1)
+        if args.clip_vloss:
+            v_clipped = b_values[idx] + torch.clamp(newvalue - b_values[idx], -args.clip_coef, args.clip_coef)
+            v_loss = 0.5 * torch.max((newvalue - b_returns[idx]) ** 2, (v_clipped - b_returns[idx]) ** 2).mean()
+        else:
+            v_loss = 0.5 * ((newvalue - b_returns[idx]) ** 2).mean()
+        loss = pg_loss - args.ent_coef * entropy.mean() + v_loss * args.vf_coef
+        grads = torch.autograd.grad(loss, params, allow_unused=True)
+        return sum((g**2).sum().item() for g in grads if g is not None)
+
+    big, small = args.batch_size, args.minibatch_size
+    perm = rng.permutation(big)
+    g_small = np.mean([grad_sq(perm[i : i + small]) for i in range(0, big, small)])
+    g_big = grad_sq(np.arange(big))
+    g2 = (big * g_big - small * g_small) / (big - small)  # estimate of |G|^2
+    tr_sigma = (g_small - g_big) / (1 / small - 1 / big)  # estimate of tr(cov)
+    return g2, tr_sigma
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -152,8 +250,23 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    lr_tag = f"lr{args.learning_rate}" + (f"_mlr{args.muon_lr}" if args.optimizer == "muon" else "")
-    run_name = f"{args.env_id}__{args.optimizer}__{lr_tag}__s{args.seed}__{int(time.time())}"
+    if any(not 0 < p < 1 for p in args.checkpoint_at):
+        sys.exit("--checkpoint-at takes fractions between 0 and 1")
+    ckpt_iters = {int(p * args.num_iterations) for p in args.checkpoint_at}
+
+    ckpt, carry = None, False
+    if args.resume_from:
+        ckpt = load_checkpoint(args.resume_from)
+        carry, problems = check_compatible(ckpt["args"], vars(args))
+        if problems:
+            sys.exit("cannot resume from this checkpoint:\n  " + "\n  ".join(problems))
+        pct = round(100 * ckpt["iteration"] / args.num_iterations)
+        mode = "carry" if carry else "reset"
+        src_opt = ckpt["args"]["optimizer"]
+        run_name = f"{args.env_id}__switch__{src_opt}-to-{args.optimizer}__at{pct}__{mode}__s{args.seed}__{int(time.time())}"
+    else:
+        lr_tag = f"lr{args.learning_rate}" + (f"_mlr{args.muon_lr}" if args.optimizer == "muon" else "")
+        run_name = f"{args.env_id}__{args.optimizer}__{lr_tag}__s{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
@@ -171,6 +284,12 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+    run_meta = run_info(args)  # not "info": the episode loop below uses that name
+    if ckpt is not None:
+        run_meta["resumed_from"] = {"path": os.path.abspath(args.resume_from), "sha256": ckpt["sha256"],
+                                "source_run": ckpt["run_name"], "iteration": ckpt["iteration"], "carry_state": carry}
+    with open(f"runs/{run_name}/run_info.json", "w") as f:
+        json.dump(run_meta, f, indent=2, default=str)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -187,6 +306,7 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
+    gns_rng = np.random.default_rng(args.seed + 12345)  # separate from np.random, which the shuffle uses
     optimizer = make_optimizer(args.optimizer, agent, args.learning_rate, muon_lr=args.muon_lr)
     base_lrs = [group["lr"] for group in optimizer.param_groups]  # initial lr per group, used for annealing
 
@@ -205,7 +325,24 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    for iteration in range(1, args.num_iterations + 1):
+    start_iteration, start_step = 1, 0
+    if ckpt is not None:
+        # everything is built as usual above, then overwritten with the checkpoint state
+        if ckpt["device"] != str(device):
+            sys.exit(f"checkpoint was made on {ckpt['device']}, this run uses {device}")
+        agent.load_state_dict(ckpt["agent"])
+        if carry:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        set_env_state(envs, ckpt["env"])
+        next_obs, next_done = ckpt["next_obs"].to(device), ckpt["next_done"].to(device)
+        global_step = start_step = ckpt["global_step"]
+        start_iteration = ckpt["iteration"] + 1
+        torch.set_rng_state(ckpt["torch_rng"])  # rng last, after anything that might use it
+        set_rng_state(ckpt["rng"], gns_rng)
+        print(f"resumed from {args.resume_from} at iteration {ckpt['iteration']} ({'carry' if carry else 'fresh'} optimizer state)")
+
+    for iteration in range(start_iteration, args.num_iterations + 1):
+        t_rollout = time.perf_counter()
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -237,6 +374,13 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
+        # fingerprint of this rollout, to check that continuations start from the same data
+        h = hashlib.sha256()
+        for buf in (obs, actions, logprobs, rewards, dones, values):
+            h.update(buf.cpu().numpy().tobytes())
+        with open(f"runs/{run_name}/rollout_hashes.txt", "a") as f:
+            f.write(f"{iteration} {global_step} {h.hexdigest()}\n")
+
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -253,6 +397,8 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
+        t_update = time.perf_counter()
+
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -261,9 +407,18 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        if args.log_gns:
+            t_gns = time.perf_counter()
+            gns_g2, gns_tr = noise_scale(agent, args, gns_rng, b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values)
+            t_gns = time.perf_counter() - t_gns
+
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
+        # per-minibatch stats, only read, never fed back into training
+        sig = {"grad_norm": [], "pg_loss": [], "v_loss": [], "entropy": [], "approx_kl": [], "old_approx_kl": []}
+        if args.log_signals:
+            params_before = torch.cat([p.detach().reshape(-1) for p in agent.parameters()]).clone()
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -309,11 +464,21 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
+
+                if args.log_signals:
+                    sig["grad_norm"].append(grad_norm.item())  # norm before clipping
+                    sig["pg_loss"].append(pg_loss.item())
+                    sig["v_loss"].append(v_loss.item())
+                    sig["entropy"].append(entropy_loss.item())
+                    sig["approx_kl"].append(approx_kl.item())
+                    sig["old_approx_kl"].append(old_approx_kl.item())
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
+
+        t_end = time.perf_counter()
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
@@ -328,8 +493,41 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        print("SPS:", int((global_step - start_step) / (time.time() - start_time)))
+        writer.add_scalar("charts/SPS", int((global_step - start_step) / (time.time() - start_time)), global_step)
+
+        if args.log_signals:
+            # iteration means over all minibatches (the losses/ tags above are last minibatch only)
+            for key, vals in sig.items():
+                writer.add_scalar(f"signals/{key}_mean", np.mean(vals), global_step)
+            gn = np.array(sig["grad_norm"])
+            writer.add_scalar("signals/grad_norm_max", gn.max(), global_step)
+            writer.add_scalar("signals/grad_clip_frac", np.mean(gn > args.max_grad_norm), global_step)
+            with torch.no_grad():
+                params_after = torch.cat([p.detach().reshape(-1) for p in agent.parameters()])
+                writer.add_scalar("signals/update_norm", (params_after - params_before).norm().item(), global_step)
+                writer.add_scalar("signals/param_norm", params_after.norm().item(), global_step)
+            writer.add_scalar("time/rollout_s", t_update - t_rollout, global_step)
+            writer.add_scalar("time/update_s", t_end - t_update - (t_gns if args.log_gns else 0.0), global_step)
+        if args.log_gns:
+            # log both parts; for analysis average each over iterations before dividing
+            writer.add_scalar("signals/gns_g2", gns_g2, global_step)
+            writer.add_scalar("signals/gns_tr_sigma", gns_tr, global_step)
+            writer.add_scalar("signals/gns_simple", gns_tr / gns_g2 if gns_g2 > 0 else float("nan"), global_step)
+            writer.add_scalar("time/gns_s", t_gns, global_step)
+
+        if iteration in ckpt_iters or (args.checkpoint_final and iteration == args.num_iterations):
+            state = {
+                "format": CKPT_FORMAT, "iteration": iteration, "global_step": global_step,
+                "num_iterations": args.num_iterations, "run_name": run_name, "args": vars(args),
+                "git_commit": run_meta["git_commit"], "device": str(device), "optimizer_name": args.optimizer,
+                "agent": agent.state_dict(), "optimizer": optimizer.state_dict(),
+                "next_obs": next_obs.cpu(), "next_done": next_done.cpu(),
+                "torch_rng": torch.get_rng_state(), "rng": get_rng_state(gns_rng), "env": get_env_state(envs),
+            }
+            path = os.path.join(args.checkpoint_dir, run_name, f"iter{iteration:04d}.pt")
+            save_safely(state, path, torch.save)
+            print(f"checkpoint saved: {path}")
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
