@@ -3,7 +3,7 @@
 Written and committed before any full-length pilot switching result exists. Any change made after
 results are seen goes under "Deviations", with the reason.
 
-- Approved by project member on 16 Nov 2026; team review pending
+- Approved by project member on 16 Nov 2026; team review pending (see Amendment 1)
 - Code: branch `pilot-halfcheetah-50`, from `main` at `5eadeb1`
   (merge of PR #1, identical to `cf6787e`; gates 1, 1b, 2a, 2b, 2c, 3 and 4 passed
   on the Windows laptop)
@@ -97,4 +97,46 @@ locally or on NCSA Delta, and with how many seeds.
 
 ## Deviations
 
-(none yet)
+### Amendment 1, 16 Nov 2026: machines for the pilot and the full oracle
+
+Status: proposed by Razan on 16 Nov 2026, team approval pending. Recorded before
+any full-length switching continuation was run. The only full-length run so far is
+the seed-1 Adam source (gate 4).
+
+The pilot itself is unchanged. It runs as written under Design: seeds 1, 2 and 3,
+sources and all 18 continuations, on the validated Windows laptop.
+
+Plan for the other machines and later work:
+
+1. While the pilot runs, Candace, Amir and Regis set up their computers and run
+   gates 2b (exact Adam resume, HalfCheetah), 2c (exact Adam resume, Hopper) and
+   3 (cold switches to SGD, RMSProp, Lion, Muon and Adam-reset) on their own
+   machines, and share the outputs with the team.
+2. A machine counts as validated only after it passes all three gates on that
+   machine. A pass on one machine says nothing about another.
+3. After the pilot is validated and the compute decision gate is held, the full
+   oracle is divided among all four teammates by complete seed blocks.
+4. A seed block is one Adam source run plus every continuation from its
+   checkpoints. The whole block runs on one validated machine, with the same code
+   commit, package versions, device (CPU) and torch thread count. A checkpoint is
+   never moved to another machine to start an official continuation.
+5. Thread counts may differ between machines. Versions, threads, host and commit
+   are taken from each run's `run_info.json`.
+6. Regis may run a Hopper seed-1 Adam source once his machine passes the gates.
+   It is preparation for the full oracle, not part of this pilot, and its
+   continuations must run on his machine.
+
+What does not change: task, seeds 1-3, switch point (iteration 244), the six
+continuations and their learning rates, the score, the quantities, the screening
+labels and thresholds, the validity checks and go/no-go.
+
+For the full oracle: differences between seeds on different machines include
+machine differences. Effects stay paired within a seed (each seed's own Adam
+source and Adam-reset), and this is reported. A source run is expected to match an
+old stage-0 baseline bit for bit only on the laptop that produced that baseline.
+
+Clarification of validity check 3 (no rule change): "timing tags ignored" means
+`compare_runs.py SOURCE CARRY --min-step 499712 --expect gate1b --ignore charts/SPS
+time/rollout_s time/update_s time/gns_s`. Without `--ignore` the wall-clock tags
+always differ and the check fails falsely. The same `--ignore` flags apply to the
+exact-resume comparisons in gates 2b and 2c.
