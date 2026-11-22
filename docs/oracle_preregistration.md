@@ -31,8 +31,7 @@ machine rules.
   checkpoints at 10/30/50/70% and final, on one validated machine per seed block.
 - Switch at 50% (iteration 244). Arms: muon (primary), lion (secondary), adam_reset
   (control); adam_carry on seed 6 only, as the exact-resume check for that machine.
-- Why these targets: in the pilot only muon and lion improved on all 3 seeds (both labelled
-  inconclusive). Muon had the largest mean delta, so it is the primary target.
+- Why these targets: muon, lion and sgd improved on all 3 pilot seeds. Muon and lion had the two largest mean deltas (both labelled inconclusive). Muon had the largest mean delta, so it is the primary target.
 - Seeds 1-3 are never pooled into the confirmation.
 
 ## Validity (both blocks, before any score is looked at)
@@ -67,11 +66,47 @@ correction), reported as exploratory.
 Machines: effects stay paired within a seed. If seeds run on different machines, this is
 reported and the machine is listed per seed.
 
+## Block C: Hopper (Amendment O1, 22 Nov 2026)
+
+Status: proposed by Razan on 22 Nov 2026, team review pending. Written before any Hopper oracle
+run exists.
+
+- Hopper-v4, seeds 1, 2, 3. New Adam 3e-4 sources (488 iterations, checkpoints at 10/30/50/70%
+  and final), made on the machine that runs the block; all continuations on that machine.
+- Switch points 10, 30, 50, 70%; all six arms with the same learning rates as HalfCheetah.
+- Order of execution: 50%, 30%, 70%, 10% (so the most useful points finish first if time runs
+  out). Order does not change the runs.
+- Validity and analysis exactly as block A (`oracle_summary.py --block A --env Hopper`),
+  including the phase rule. A point is analysed only when all 3 seeds pass validation there.
+- Task dependence (HalfCheetah vs Hopper) is reported separately from phase claims (RQ1).
+  A Hopper result does not confirm or refute a HalfCheetah result, or the reverse.
+- Stage-0 Hopper baselines came from another machine; new sources are not expected to match them
+  bit for bit, and they are not used in the deltas.
+
 ## Not covered here
 
-Hopper (seeds 1-3, all points) and any other task get their own amendment before their first
-run.
+Any other task gets its own amendment before its first run.
 
 ## Deviations
 
-None yet.
+None to the design.
+
+Machines, 22 Nov 2026 (proposal, team review pending). Gate evidence for each machine was
+re-checked by Claude from the run files (see `docs/machine_validation.md`).
+- Block A: Razan's laptop, 16 threads (as the seed 1-3 sources).
+- Block B: Amir's machine (DESKTOP-62RT6MV), all five seeds, 16 threads, same package versions
+  as the laptop.
+- Block C: Candace's Mac, all three seeds, 4 threads, MuJoCo 3.17.0 (the other machines use
+  3.16.0). Allowed under Amendment 1 because the whole block runs on one machine with one
+  version set; it is reported.
+- On any machine, runs may execute in parallel at that machine's fixed thread count (same
+  thread count gives identical rollouts; tested on the laptop 21 Nov).
+
+Note, 22 Nov 2026 (before any oracle score was viewed; 30% and 70% for seeds 1-3 had run and
+validated, scores not viewed): added `analysis/oracle_summary.py`, the analysis exactly as in
+"Analysis" above (it reproduces `pilot_summary.py` at 50%), and extended
+`analysis/run_oracle_block.py` with `--arms` (block B subset) and `--make-sources` (trains and
+checks new Adam sources) and `--env` (Hopper). Completed runs from an earlier commit are
+accepted when their `src/` is identical to HEAD (new runs must record HEAD), so runs that
+record `4870b9a` still revalidate. The summary refuses to report if any preregistered run or
+adam_carry control is missing.

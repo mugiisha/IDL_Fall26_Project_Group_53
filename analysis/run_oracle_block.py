@@ -1,6 +1,7 @@
 """Run oracle continuations for complete seed blocks, one run at a time. No scoring.
 
 Generalises run_halfcheetah_pilot.py to any switch point (10/30/50/70%).
+With --make-sources it also trains missing Adam sources first (block B, new seeds).
 Same rules: committed code only, never overwrite, revalidate existing folders first,
 every check saved to an evidence folder and must print its PASS line.
 """
@@ -11,7 +12,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ENV = 'HalfCheetah-v4'
 NUM_STEPS = 2048
 BASE_LR = 0.0003  # source Adam lr
 PREREG = 'docs/oracle_preregistration.md'
@@ -57,6 +57,11 @@ def runinfo(folder, threads):
     return str(data.get('git_commit', ''))
 
 
+def same_code(repo, commit):
+    # runs from an earlier commit are fine if the training code is identical
+    return bool(commit) and ok(['git', 'diff', '--quiet', commit, 'HEAD', '--', 'src'], repo)
+
+
 def log_count(folder, expected):
     log = folder / 'log.txt'
     require(log.is_file(), f'Missing log: {log}')
@@ -66,9 +71,12 @@ def log_count(folder, expected):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--env', default='HalfCheetah-v4', choices=['HalfCheetah-v4', 'Hopper-v4'])
     p.add_argument('--points', nargs='+', type=int, required=True, choices=[10, 30, 50, 70], help='run in this order')
     p.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3])
     p.add_argument('--branch', default='pilot-halfcheetah-50')
+    p.add_argument('--arms', nargs='+', default=list(ARMS), choices=list(ARMS), help='block B uses a subset')
+    p.add_argument('--make-sources', action='store_true', help='train a missing Adam source for a seed first')
     p.add_argument('--threads', type=int, default=16, help='must match the sources')
     p.add_argument('--env-check', default=LAPTOP_ENV, help='expected versions line (laptop default)')
     p.add_argument('--total-steps', type=int, default=1000000, help='only change for a small test')
@@ -94,32 +102,42 @@ def main():
     for pt, k in K.items():
         require(round(100 * k / n_iter) == pt, f'Point {pt}% does not map to a checkpoint')
 
-    blocks = {s: root / f'HalfCheetah_s{s}' for s in args.seeds}
+    prefix = args.env.split('-')[0]
+    blocks = {s: root / f'{prefix}_s{s}' for s in args.seeds}
+    arms = [a for a in ARMS if a in args.arms]
+    missing = [s for s, b in blocks.items() if not (b / 'source').exists()]
+    require(not missing or args.make_sources, f'No source for seeds {missing}; use --make-sources')
     ckpts = {}
-    for s, b in blocks.items():
+
+    def source_checks(s, b):
         runs = list((b / 'source' / 'runs').glob('*'))
         require(len(runs) == 1, f'Expected one source run in {b}')
-        commit = runinfo(b / 'source', args.threads)
-        require(ok(['git', 'diff', '--quiet', commit, 'HEAD', '--', 'src'], repo), f'Source code differs from HEAD: {b}')
+        require(same_code(repo, runinfo(b / 'source', args.threads)), f'Source code differs from HEAD: {b}')
         log_count(b / 'source', n_iter)
         for pt, k in K.items():
             ck = b / 'source' / 'checkpoints' / runs[0].name / f'iter{k:04d}.pt'
             require(ck.is_file(), f'Missing {ck}')
             state = capture([sys.executable, analysis / 'show_lrs.py', ck], repo)
             lr = f'lr {BASE_LR * (1 - (k - 1) / n_iter):.4g}'
-            require(f'iteration {k} ' in state and 'optimizer adam' in state and lr in state and 'all finite' in state,
+            require(args.env in state and f'iteration {k} ' in state and 'optimizer adam' in state and lr in state and 'all finite' in state,
                     f'Checkpoint check failed: {state}')
             ckpts[s, pt] = ck
         print(f'Seed {s}: source and checkpoints {sorted(K.values())} found', flush=True)
 
+    for s, b in blocks.items():
+        if s not in missing:
+            source_checks(s, b)
+
     print('\nPlan (existing folders are revalidated, never overwritten):', flush=True)
+    for s in missing:
+        print(f'  seed {s} Adam source: new', flush=True)
     for pt in args.points:
         for s, b in blocks.items():
-            for name in ARMS:
+            for name in arms:
                 folder = b / f'at{pt}_{name}'
                 if folder.exists():
                     log_count(folder, n_iter - K[pt])
-                    require(runinfo(folder, args.threads) == head, f'Recorded commit is not HEAD: {folder}')
+                    require(same_code(repo, runinfo(folder, args.threads)), f'Training code differs from HEAD: {folder}')
                 print(f'  {pt}% seed {s} {name}: {"existing" if folder.exists() else "new"}', flush=True)
     if not args.run_after_approval:
         print('\nDRY RUN ONLY. No training started and no files written.', flush=True)
@@ -138,28 +156,50 @@ def main():
         output = path.read_text(encoding='utf-8', errors='replace')
         require(result.returncode == 0 and all(x in output for x in expected), f'Validation failed: {path}')
 
+    for s in missing:
+        b = blocks[s]
+        git_check(repo, args.branch, head)
+        print(f'[{datetime.now():%H:%M:%S}] Training seed {s} Adam source', flush=True)
+        (b / 'source').mkdir(parents=True, exist_ok=False)
+        cmd = [sys.executable, str(ppo), '--env-id', args.env, '--seed', str(s), '--total-timesteps', str(args.total_steps),
+               '--optimizer', 'adam', '--learning-rate', str(BASE_LR), '--checkpoint-at', '0.1', '0.3', '0.5', '0.7', '--checkpoint-final']
+        with (b / 'source' / 'log.txt').open('x', encoding='utf-8') as f:
+            result = subprocess.run(cmd, cwd=b / 'source', stdout=f, stderr=subprocess.STDOUT)
+        require(result.returncode == 0, f'Training failed: {b / "source" / "log.txt"}')
+        require(runinfo(b / 'source', args.threads) == head, f'Recorded commit is not HEAD: {b}')
+        check(f's{s}_source_signals', 'check_run.py', [b / 'source' / 'runs', '--expect', 'gate1b'],
+              [f'{n_iter} iterations, steps {NUM_STEPS} to {n_iter * NUM_STEPS}', 'PASS: all values finite, expected tags present'])
+        for it in [int(f * n_iter) for f in (0.1, 0.3, 0.5, 0.7)] + [n_iter]:
+            found = list((b / 'source' / 'checkpoints').glob(f'*/iter{it:04d}.pt'))
+            require(len(found) == 1, f'Missing checkpoint {it} for seed {s}')
+        source_checks(s, b)
+        print(f'[{datetime.now():%H:%M:%S}] PASS seed {s} source', flush=True)
+
     for pt in args.points:
         k = K[pt]
         n_new = n_iter - k
         for s, b in blocks.items():
             source = b / 'source' / 'runs'
-            order = sorted(ARMS, key=lambda name: not (b / f'at{pt}_{name}').exists())
+            order = sorted(arms, key=lambda name: not (b / f'at{pt}_{name}').exists())
             for name in order:
                 git_check(repo, args.branch, head)
                 folder = b / f'at{pt}_{name}'
                 label = f'p{pt}_s{s}_{name}'
-                if folder.exists():
+                new = not folder.exists()
+                if not new:
                     print(f'[{datetime.now():%H:%M:%S}] Revalidating {label}', flush=True)
                 else:
                     print(f'[{datetime.now():%H:%M:%S}] Training {label}', flush=True)
                     folder.mkdir(exist_ok=False)
-                    cmd = [sys.executable, str(ppo), '--env-id', ENV, '--seed', str(s), '--total-timesteps', str(args.total_steps),
+                    cmd = [sys.executable, str(ppo), '--env-id', args.env, '--seed', str(s), '--total-timesteps', str(args.total_steps),
                            *ARMS[name], '--resume-from', str(ckpts[s, pt])]
                     with (folder / 'log.txt').open('x', encoding='utf-8') as f:
                         result = subprocess.run(cmd, cwd=folder, stdout=f, stderr=subprocess.STDOUT)
                     require(result.returncode == 0, f'Training failed: {folder / "log.txt"}')
                 log_count(folder, n_new)
-                require(runinfo(folder, args.threads) == head, f'Recorded commit is not HEAD: {folder}')
+                commit = runinfo(folder, args.threads)
+                # new runs must record HEAD; older ones only need identical training code
+                require(commit == head if new else same_code(repo, commit), f'Recorded commit not accepted: {folder}')
                 runs = folder / 'runs'
                 check(label + '_signals', 'check_run.py', [runs, '--expect', 'gate1b'],
                       [f'{n_new} iterations, steps {(k + 1) * NUM_STEPS} to {n_iter * NUM_STEPS}', 'PASS: all values finite, expected tags present'])
@@ -170,9 +210,9 @@ def main():
                 else:
                     check(label + '_first_rollout', 'check_rollouts.py', [source, runs, '--first'], [f'PASS: first shared iteration ({k + 1}) identical'])
                 print(f'[{datetime.now():%H:%M:%S}] PASS {label}', flush=True)
-            check(f'p{pt}_s{s}_group_first_rollout', 'check_rollouts.py', [source, *(b / f'at{pt}_{n}' / 'runs' for n in ARMS), '--first'],
+            check(f'p{pt}_s{s}_group_first_rollout', 'check_rollouts.py', [source, *(b / f'at{pt}_{n}' / 'runs' for n in arms), '--first'],
                   [f'PASS: first shared iteration ({k + 1}) identical'])
-            print(f'{pt}% seed {s}: all six continuations passed.', flush=True)
+            print(f'{pt}% seed {s}: all {len(arms)} continuations passed.', flush=True)
     print(f'ALL PASSED for points {args.points}, seeds {args.seeds}. No scores viewed. Evidence: {evidence}', flush=True)
 
 
