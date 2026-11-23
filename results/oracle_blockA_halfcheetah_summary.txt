@@ -1,0 +1,133 @@
+block A, seeds [1, 2, 3], points [10, 30, 50, 70]
+per seed (delta = run - source Adam; dip = 16 iters after switch minus source 10 before)
+  point seed run             score     delta  vs reset       dip
+     10    1 sgd            1453.7      24.8      26.0     131.4
+     10    1 rmsprop        1426.6      -2.2      -1.1     163.5
+     10    1 lion           1505.6      76.8      77.9     174.6
+     10    1 muon           1295.3    -133.5    -132.4     181.9
+     10    1 adam_reset     1427.7      -1.2       0.0     200.5
+     10    1 adam_carry     1428.9       0.0       1.2     210.4
+     10    2 sgd            1385.0    -183.8    -152.1     366.2
+     10    2 rmsprop        1440.1    -128.8     -97.0     360.3
+     10    2 lion           1699.0     130.1     161.9     388.2
+     10    2 muon           1480.1     -88.7     -56.9     396.7
+     10    2 adam_reset     1537.0     -31.8       0.0     348.3
+     10    2 adam_carry     1568.8       0.0      31.8     348.9
+     10    3 sgd            1552.0       0.6     -41.6     206.2
+     10    3 rmsprop        1463.1     -88.3    -130.6     166.5
+     10    3 lion           1683.1     131.7      89.4     241.6
+     10    3 muon           1482.7     -68.7    -110.9     199.5
+     10    3 adam_reset     1593.6      42.2       0.0     221.6
+     10    3 adam_carry     1551.4       0.0     -42.2     210.1
+     30    1 sgd            1353.4     -75.5     -64.4      16.9
+     30    1 rmsprop        1362.6     -66.3     -55.2      42.5
+     30    1 lion           1538.5     109.6     120.7      35.3
+     30    1 muon           1464.8      35.9      47.0      56.9
+     30    1 adam_reset     1417.8     -11.1       0.0      45.8
+     30    1 adam_carry     1428.9       0.0      11.1      48.7
+     30    2 sgd            1568.9       0.1     -13.6      35.0
+     30    2 rmsprop        1499.9     -68.9     -82.6      49.6
+     30    2 lion           1608.8      39.9      26.3      37.8
+     30    2 muon           1623.0      54.1      40.5      44.9
+     30    2 adam_reset     1582.5      13.7       0.0      30.6
+     30    2 adam_carry     1568.8       0.0     -13.7      46.7
+     30    3 sgd            1609.4      58.0      53.3      27.8
+     30    3 rmsprop        1542.5      -8.9     -13.6      58.2
+     30    3 lion           1681.7     130.3     125.7      91.4
+     30    3 muon           1698.9     147.5     142.9      70.0
+     30    3 adam_reset     1556.1       4.6       0.0      55.1
+     30    3 adam_carry     1551.4       0.0      -4.6      69.0
+     50    1 sgd            1458.0      29.1      41.9       9.6
+     50    1 rmsprop        1405.9     -23.0     -10.3      26.3
+     50    1 lion           1498.1      69.2      82.0      36.7
+     50    1 muon           1554.4     125.5     138.3      28.0
+     50    1 adam_reset     1416.1     -12.8       0.0      19.2
+     50    1 adam_carry     1428.9       0.0      12.8      25.7
+     50    2 sgd            1592.8      23.9      92.2      28.0
+     50    2 rmsprop        1538.9     -29.9      38.4       8.7
+     50    2 lion           1652.9      84.1     152.4      58.5
+     50    2 muon           1672.1     103.3     171.6      28.7
+     50    2 adam_reset     1500.5     -68.3       0.0      48.2
+     50    2 adam_carry     1568.8       0.0      68.3      33.1
+     50    3 sgd            1560.7       9.3      21.8      15.2
+     50    3 rmsprop        1562.4      11.0      23.5      14.2
+     50    3 lion           1643.7      92.2     104.8      36.3
+     50    3 muon           1666.1     114.7     127.2      36.4
+     50    3 adam_reset     1538.9     -12.5       0.0      24.6
+     50    3 adam_carry     1551.4       0.0      12.5      35.6
+     70    1 sgd            1421.1      -7.8      -5.6      15.1
+     70    1 rmsprop        1435.4       6.5       8.7       7.3
+     70    1 lion           1441.2      12.3      14.5      27.1
+     70    1 muon           1510.7      81.8      83.9      35.9
+     70    1 adam_reset     1426.7      -2.2       0.0      27.6
+     70    1 adam_carry     1428.9       0.0       2.2      11.4
+     70    2 sgd            1503.4     -65.5      46.7      -9.2
+     70    2 rmsprop        1570.4       1.6     113.8       2.9
+     70    2 lion           1553.9     -14.9      97.2      14.4
+     70    2 muon           1654.7      85.9     198.0      17.7
+     70    2 adam_reset     1456.7    -112.2       0.0     -11.7
+     70    2 adam_carry     1568.8       0.0     112.2      -6.0
+     70    3 sgd            1529.9     -21.6     -29.4     -30.8
+     70    3 rmsprop        1546.9      -4.5     -12.4       5.8
+     70    3 lion           1605.1      53.7      45.9       7.8
+     70    3 muon           1616.3      64.9      57.1      11.8
+     70    3 adam_reset     1559.3       7.8       0.0       9.7
+     70    3 adam_carry     1551.4       0.0      -7.8      -0.9
+
+screening per point (descriptive only, not significance)
+  point target      mean delta      sd  mean vs reset  label
+     10 sgd              -52.8   114.1          -55.9  inconclusive
+     10 rmsprop          -73.1    64.6          -76.2  inconclusive
+     10 lion             112.9    31.3          109.8  inconclusive
+     10 muon             -97.0    33.2         -100.1  inconclusive
+     10 adam_reset         3.1    37.2            0.0  inconclusive
+     30 sgd               -5.8    66.9           -8.2  inconclusive
+     30 rmsprop          -48.0    33.9          -50.4  inconclusive
+     30 lion              93.3    47.4           90.9  inconclusive
+     30 muon              79.2    59.9           76.8  inconclusive
+     30 adam_reset         2.4    12.5            0.0  inconclusive
+     50 sgd               20.8    10.3           52.0  inconclusive
+     50 rmsprop          -14.0    21.9           17.2  inconclusive
+     50 lion              81.9    11.7          113.0  inconclusive
+     50 muon             114.5    11.1          145.7  inconclusive
+     50 adam_reset       -31.2    32.1            0.0  inconclusive
+     70 sgd              -31.6    30.1            3.9  inconclusive
+     70 rmsprop            1.2     5.5           36.7  inconclusive
+     70 lion              17.0    34.6           52.5  inconclusive
+     70 muon              77.5    11.1          113.0  inconclusive
+     70 adam_reset       -35.5    66.6            0.0  inconclusive
+
+phase rule: Delta(p1) - Delta(p2), paired by seed; a statement needs the same sign on
+all 3 seeds and |mean| >= 150, otherwise inconclusive
+  sgd         10% vs 30%:  +100.3  -183.9   -57.4  mean   -47.0  inconclusive
+  sgd         10% vs 50%:    -4.3  -207.8    -8.7  mean   -73.6  inconclusive
+  sgd         10% vs 70%:   +32.6  -118.4   +22.1  mean   -21.2  inconclusive
+  sgd         30% vs 50%:  -104.6   -23.8   +48.7  mean   -26.6  inconclusive
+  sgd         30% vs 70%:   -67.7   +65.6   +79.5  mean   +25.8  inconclusive
+  sgd         50% vs 70%:   +36.9   +89.4   +30.8  mean   +52.4  inconclusive
+  rmsprop     10% vs 30%:   +64.0   -59.9   -79.4  mean   -25.1  inconclusive
+  rmsprop     10% vs 50%:   +20.8   -98.9   -99.3  mean   -59.1  inconclusive
+  rmsprop     10% vs 70%:    -8.8  -130.4   -83.8  mean   -74.3  inconclusive
+  rmsprop     30% vs 50%:   -43.3   -39.0   -19.9  mean   -34.0  inconclusive
+  rmsprop     30% vs 70%:   -72.8   -70.5    -4.4  mean   -49.3  inconclusive
+  rmsprop     50% vs 70%:   -29.6   -31.5   +15.5  mean   -15.2  inconclusive
+  lion        10% vs 30%:   -32.8   +90.2    +1.3  mean   +19.6  inconclusive
+  lion        10% vs 50%:    +7.5   +46.0   +39.4  mean   +31.0  inconclusive
+  lion        10% vs 70%:   +64.4  +145.1   +77.9  mean   +95.8  inconclusive
+  lion        30% vs 50%:   +40.4   -44.2   +38.1  mean   +11.4  inconclusive
+  lion        30% vs 70%:   +97.2   +54.8   +76.6  mean   +76.2  inconclusive
+  lion        50% vs 70%:   +56.9   +99.0   +38.5  mean   +64.8  inconclusive
+  muon        10% vs 30%:  -169.5  -142.8  -216.2  mean  -176.2  better at 30%
+  muon        10% vs 50%:  -259.1  -192.0  -183.4  mean  -211.5  better at 50%
+  muon        10% vs 70%:  -215.3  -174.6  -133.6  mean  -174.5  better at 70%
+  muon        30% vs 50%:   -89.6   -49.2   +32.8  mean   -35.3  inconclusive
+  muon        30% vs 70%:   -45.9   -31.7   +82.6  mean    +1.7  inconclusive
+  muon        50% vs 70%:   +43.8   +17.5   +49.8  mean   +37.0  inconclusive
+  adam_reset  10% vs 30%:    +9.9   -45.4   +37.6  mean    +0.7  inconclusive
+  adam_reset  10% vs 50%:   +11.6   +36.5   +54.7  mean   +34.3  inconclusive
+  adam_reset  10% vs 70%:    +1.0   +80.4   +34.4  mean   +38.6  inconclusive
+  adam_reset  30% vs 50%:    +1.7   +81.9   +17.2  mean   +33.6  inconclusive
+  adam_reset  30% vs 70%:    -8.9  +125.8    -3.2  mean   +37.9  inconclusive
+  adam_reset  50% vs 70%:   -10.6   +43.9   -20.4  mean    +4.3  inconclusive
+
+written results/oracle_blockA_halfcheetah.csv
